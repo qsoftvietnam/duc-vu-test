@@ -1,0 +1,81 @@
+name: Docker build
+
+on:
+  workflow_dispatch 
+# you can trigger on anything you want
+
+env:
+  PROJECT_ID: ${{ secrets.GKE_PROJECT }}
+  GKE_CLUSTER: kbt-platform-dev-sg-001    
+  GKE_ZONE: asia-southeast2   
+  DEPLOYMENT_NAME: app 
+
+jobs:
+  build:
+   runs-on: ubuntu-latest
+  
+   steps:
+     - uses: actions/checkout@v2
+     - name: Build Docker image 
+       run: docker build -t app .
+     - name: Run tests inside the container
+       run: docker images 
+     -
+       name: Login to Docker Hub
+       uses: docker/login-action@v2
+       with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+     - name: Tag image
+       run: docker tag app:latest ${{ secrets.DOCKERHUB_USERNAME }}/python:app
+     - name: Configure AWS credentials
+       uses: aws-actions/configure-aws-credentials@v1
+       with:
+         aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+         aws-secret-access-key: ${{ secrets.SECRET_KEY }}
+         aws-region: ap-southeast-1
+     - name: Push image 
+       run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/python:app
+     - name: deploy to ec2
+       env:
+           PRIVATE_KEY: ${{ secrets.AWS_PRIVATE_KEY }}
+           HOSTNAME: ${{ secrets.HOSTNAME }}
+           USER_NAME: ${{ secrets.USER_NAME }}
+       run: |
+         echo ${PRIVATE_KEY} > private_key && chmod 600 private_key
+         ssh -o StrictHostKeyChecking=no -i private_key ${USER_NAME}@${HOSTNAME}
+         sudo su - 
+         docker login
+         docker pull tuhao910/python:app
+         docker run tuhao910/python:app
+         
+     - id: 'auth'
+       name: 'Authenticate to Google Cloud'
+       uses: 'google-github-actions/auth@v0'
+       with:
+         token_format: 'access_token'
+         workload_identity_provider: 'projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider'
+         service_account: 'my-service-account@my-project.iam.gserviceaccount.com'
+     - name: Set up GKE credentials
+       uses: google-github-actions/get-gke-credentials@v0
+       with:
+         cluster_name: ${{ env.GKE_CLUSTER }}
+         location: ${{ env.GKE_ZONE }}
+     - name: Set up Kustomize
+       run: |-
+         curl -sfLo kustomize https://github.com/kubernetes-sigs/kustomize/releases/download/v3.1.0/kustomize_3.1.0_linux_amd64
+         chmod u+x ./kustomize
+     - name: Deploy
+       run: |-
+         ./kustomize edit set image tuhao910/python:app
+         ./kustomize build . | kubectl apply -f -
+         kubectl rollout status deployment/$DEPLOYMENT_NAME
+         kubectl get services -o wide
+
+     - name: terraform 
+       run: terraform init
+     - name: terraform plan 
+       run: terraform plan 
+     - name: terrafarom apply
+       run: terraform apply -auto-approve
+
